@@ -1,0 +1,309 @@
+Excellent decision! Let's start with a structured, assignment-style guide for the first major milestone of Project 1. This approach will help you learn by doing while providing the scaffolding you need.
+
+---
+
+# **Project 1: I2C Master Controller - Phase 1 Assignment**
+**Due: Complete this phase before moving to Phase 2**
+
+## **Learning Objectives**
+By completing this assignment, you will:
+1. Understand the I2C protocol at the signal level
+2. Design a modular, parameterizable I2C master controller
+3. Implement a clean FSM for I2C transaction control
+4. Create basic self-checking tests for protocol compliance
+5. Develop professional coding practices for RTL design
+
+## **Background Reading Required**
+Before starting, read these I2C protocol essentials:
+1. **I2C Bus Specification** (focus on Standard-mode, 100 kHz):
+   - 2-wire interface: SCL (clock), SDA (data)
+   - 7-bit addressing
+   - START condition: SDA falls while SCL is HIGH
+   - STOP condition: SDA rises while SCL is HIGH
+   - ACK/NACK: Receiver pulls SDA LOW (ACK) or leaves HIGH (NACK) after 8 bits
+   
+2. **Key Timing Parameters** (100kHz mode):
+   - tSU;STA (START setup): >4.7µs
+   - tHD;STA (START hold): >4.0µs
+   - tLOW (SCL LOW period): >4.7µs
+   - tHIGH (SCL HIGH period): >4.0µs
+   - tSU;STO (STOP setup): >4.0µs
+
+## **Assignment Part A: Design Specification**
+
+### **Module Requirements**
+
+Design `i2c_master.sv` with the following specifications:
+
+**Parameters:**
+- `CLK_FREQ`: Frequency of input clock (default 100 MHz)
+- `I2C_FREQ`: Desired I2C clock frequency (default 100 kHz)
+
+**Interface:**
+```systemverilog
+module i2c_master #(
+    parameter CLK_FREQ = 100_000_000,
+    parameter I2C_FREQ = 100_000
+)(
+    input  logic        clk,
+    input  logic        rst_n,
+    // Control Interface
+    input  logic        start,          // Pulse to start transaction
+    input  logic [6:0]  addr,           // 7-bit I2C address
+    input  logic        rw,             // 0=write, 1=read
+    input  logic [7:0]  data_wr,        // Data to write
+    output logic [7:0]  data_rd,        // Data read
+    output logic        ready,          // High when idle, ready for command
+    output logic        ack_error,      // High if NACK received
+    // I2C Physical Interface
+    output logic        scl_o,          // SCL output
+    output logic        scl_t,          // SCL tri-state enable (1=Hi-Z)
+    output logic        sda_o,          // SDA output  
+    output logic        sda_t,          // SDA tri-state enable (1=Hi-Z)
+    input  logic        sda_i           // SDA input (for reading)
+);
+```
+
+**Functional Requirements:**
+1. **Idle State:** SCL and SDA both HIGH (released)
+2. **Start Sequence:** Generate proper START condition
+3. **Address Phase:** Send 7-bit address + R/W bit, check ACK
+4. **Data Phase:** 
+   - Write mode: Send 8-bit data, check ACK
+   - Read mode: Receive 8-bit data, send ACK/NACK
+5. **Stop Sequence:** Generate proper STOP condition
+6. **Tri-state Control:** Properly manage scl_t/sda_t for open-drain simulation
+
+## **Assignment Part B: Architecture Planning**
+
+### **Step 1: FSM State Design**
+Design a state machine with **minimum 9 states**. Sketch this on paper first.
+
+**Suggested States:**
+1. `IDLE` - Waiting for start command
+2. `START_1` - Setup for START condition
+3. `START_2` - Generate START condition
+4. `ADDR` - Send address + R/W bit
+5. `ACK_ADDR` - Check ACK for address
+6. `DATA` - Send/receive data byte
+7. `ACK_DATA` - Handle ACK/NACK for data
+8. `STOP_1` - Setup for STOP condition
+9. `STOP_2` - Generate STOP condition
+
+**Your Task:** Draw the state diagram with transition conditions. Consider:
+- What happens on NACK during address phase?
+- How do you handle repeated START?
+- What error conditions need recovery?
+
+### **Step 2: Clock Generation Strategy**
+Calculate and implement I2C clock generation:
+
+**Formula:**
+```
+SCL_COUNT = CLK_FREQ / (I2C_FREQ * 4)
+```
+Example: 100MHz / (100kHz * 4) = 250 clock cycles per quarter-period
+
+**Implementation Hint:** Use a counter that counts 0→SCL_COUNT-1, then resets. Divide this into 4 phases per I2C clock cycle.
+
+### **Step 3: Data Shifting Strategy**
+Design a shift register approach:
+- For writing: Parallel load → shift out MSB-first
+- For reading: Shift in MSB-first → parallel read
+
+## **Assignment Part C: Implementation Tasks**
+
+### **Task 1: Create Project Structure**
+```
+i2c_project/
+├── rtl/
+│   ├── i2c_master.sv          # Main module
+│   └── i2c_shift_reg.sv       # Optional helper module
+├── tb/
+│   ├── i2c_tb.sv              # Testbench
+│   ├── i2c_slave_model.sv     # Simple slave for testing
+│   └── i2c_tests.sv           # Test cases
+├── sim/
+│   └── run.do                 # ModelSim/Vivado run script
+└── docs/
+    └── state_diagram.md       # Your state diagram
+```
+
+### **Task 2: Implement Core FSM (Skeleton)**
+Start with this skeleton and fill in the logic:
+```systemverilog
+typedef enum logic [3:0] {
+    IDLE,
+    START_1,
+    START_2,
+    ADDR,
+    ACK_ADDR,
+    DATA,
+    ACK_DATA,
+    STOP_1,
+    STOP_2
+} state_t;
+
+state_t current_state, next_state;
+
+// State transition logic
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) current_state <= IDLE;
+    else current_state <= next_state;
+end
+
+// Next state logic (combinational)
+always_comb begin
+    next_state = current_state;
+    case (current_state)
+        IDLE: if (start) next_state = START_1;
+        START_1: if (phase_done) next_state = START_2;
+        // ... Your implementation here ...
+    endcase
+end
+```
+
+### **Task 3: Implement Clock Generator**
+Create a counter-based clock generator:
+```systemverilog
+logic [15:0] clk_counter;
+logic quarter_pulse;  // Pulses every quarter SCL period
+
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        clk_counter <= 0;
+        quarter_pulse <= 0;
+    end else begin
+        if (clk_counter == SCL_COUNT-1) begin
+            clk_counter <= 0;
+            quarter_pulse <= 1;
+        end else begin
+            clk_counter <= clk_counter + 1;
+            quarter_pulse <= 0;
+        end
+    end
+end
+```
+
+### **Task 4: Implement SCL/SDA Control**
+Key insight: I2C is open-drain. You don't drive HIGH; you release (Hi-Z).
+```systemverilog
+// SCL control: Only drive LOW when we need to
+assign scl_o = 1'b0;  // Only drive LOW
+assign scl_t = (scl_enable) ? 1'b0 : 1'b1;  // 0=drive, 1=Hi-Z
+
+// SDA similar but more complex - depends on state and data
+```
+
+## **Assignment Part D: Testing Strategy**
+
+### **Test 1: Basic Write Transaction**
+Create a test that:
+1. Resets the module
+2. Waits for `ready` signal
+3. Pulses `start` with address=0x48, rw=0, data=0xAA
+4. Monitors I2C bus for correct timing
+5. Verifies `ready` goes low during transaction, high after
+6. Checks no ack_error
+
+### **Test 2: Basic Read Transaction**
+Similar but with rw=1
+
+### **Test 3: Error Condition**
+Test NACK response by having slave model send NACK
+
+## **Debugging Checklist**
+
+When your design doesn't work, check these in order:
+
+1. **Reset Behavior:** Does everything go to idle state on reset?
+2. **Ready Signal:** Does `ready` go low when `start` is pulsed?
+3. **START Condition:** On scope/simulation, do you see SDA fall while SCL is high?
+4. **Address Transmission:** Are 8 bits (7 addr + R/W) sent MSB-first?
+5. **ACK Detection:** Does slave pull SDA low during ACK phase?
+6. **Data Transmission:** Are data bits aligned with SCL edges?
+7. **STOP Condition:** Does SDA rise while SCL is high?
+
+## **Common Pitfalls & Solutions**
+
+**Pitfall 1:** SCL/SDA timing violations
+- **Solution:** Use the quarter-period approach. Each I2C clock cycle = 4 quarter phases. Control edges at phase boundaries.
+
+**Pitfall 2:** Open-drain simulation
+- **Solution:** In testbench, use `wire sda = (sda_t) ? 1'bz : sda_o;` and similar for SCL.
+
+**Pitfall 3:** ACK detection timing
+- **Solution:** Sample SDA in the middle of the ACK clock pulse, not at edges.
+
+**Pitfall 4:** State machine getting stuck
+- **Solution:** Add timeout counters in each state. If stuck for too many cycles, go to error recovery.
+
+## **Deliverables for This Phase**
+
+Submit the following for "grading" (self-assessment):
+
+1. **State Diagram** (hand-drawn or digital) showing all states and transitions
+2. **Timing Diagram** showing one complete write transaction with correct timing
+3. **i2c_master.sv** with complete implementation
+4. **Basic Testbench** that tests a single write transaction
+5. **Simulation Results** showing:
+   - Correct START condition
+   - Address + R/W transmission
+   - ACK response
+   - Data transmission
+   - STOP condition
+6. **Answers to Questions:**
+   - How many clock cycles per I2C bit at 100MHz/100kHz?
+   - What happens if start is asserted while not ready?
+   - How does your design handle clock stretching? (Hint: It probably doesn't yet - that's Phase 2)
+
+## **Expected Timeline**
+
+**Day 1-2:** Study I2C spec, draw state diagram  
+**Day 3-4:** Implement FSM skeleton and state transitions  
+**Day 5-6:** Implement clock generation and SCL control  
+**Day 7-8:** Implement SDA control and data shifting  
+**Day 9-10:** Create basic testbench, debug  
+**Day 11-12:** Fix timing issues, verify waveforms  
+
+## **Getting Unstuck Protocol**
+
+If stuck for more than 2 hours on the same issue:
+
+1. **First:** Re-examine the I2C timing diagram. Annotate your simulation with the spec times.
+2. **Second:** Simplify! Can you get just the START condition working? Then STOP? Then add data.
+3. **Third:** Search for "I2C master Verilog" examples to understand different approaches (but don't copy).
+4. **Fourth:** Ask for specific help with: "My START condition doesn't meet tSU;STA because..."
+
+## **Success Criteria**
+
+Your Phase 1 is complete when:
+- [ ] Single write transaction works correctly in simulation
+- [ ] All I2C timing parameters are met (check with measurements)
+- [ ] Ready signal behaves correctly (high when idle)
+- [ ] No simulation warnings about multiple drivers on SDA/SCL
+- [ ] You can explain each state's purpose to someone else
+
+---
+
+## **Next Phase Preview**
+
+Once Phase 1 is complete, Phase 2 will add:
+1. APB bus interface (connecting to a processor)
+2. Register bank for control/status
+3. Multiple byte transactions
+4. Clock stretching support
+5. Advanced verification with scoreboard and coverage
+
+## **Why This Approach Works**
+
+You're building incrementally:
+1. **Core protocol engine** (Phase 1) - The hardest part
+2. **Bus interface** (Phase 2) - Making it usable in systems
+3. **Verification** (Phase 3) - Making it reliable
+
+Each phase builds on the last. If you get stuck in Phase 1, you haven't wasted time on interfaces or verification.
+
+**Ready to begin?** Start by drawing your state diagram. This is the most important step - a good diagram makes coding straightforward.
+
+Would you like me to elaborate on any specific part, like how to properly simulate open-drain signals or how to structure the quarter-period state machine?
